@@ -1,0 +1,90 @@
+{
+  "name": "relay",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "desktop/main.cjs",
+  "description": "Relay translates as you type while keeping your voice.",
+  "scripts": {
+    "start": "electron .",
+    "service": "node src/server.js",
+    "test": "node test/pipeline.test.js && node test/e2e.test.js && node test/flows.test.js",
+    "test:release": "node scripts/smoke-release.mjs",
+    "build:font": "node scripts/build-font.mjs",
+    "build:icon": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-brand-assets.ps1 && node scripts/build-icon.mjs",
+    "build:server": "node scripts/build-server.mjs",
+    "build:helper": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1",
+    "build:runtime": "npm run build:server && npm run build:helper",
+    "build": "npm run build:font && npm run build:icon && npm run build:runtime && electron-builder --win",
+    "release": "npm run build:font && npm run build:icon && npm run build:runtime && electron-builder --win --publish always"
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "^0.70.0",
+    "@fontsource/jua": "^5.3.0",
+    "electron": "^44.1.1",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.2"
+  },
+  "engines": {
+    "node": ">=26"
+  },
+  "build": {
+    "appId": "com.relay.desktop",
+    "productName": "Relay",
+    "asar": true,
+    "files": [
+      "desktop/**/*",
+      "package.json",
+      "node_modules/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": ".release/runtime",
+        "to": "runtime"
+      }
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "icon": "desktop/assets/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Relay",
+      "uninstallDisplayName": "Relay",
+      "artifactName": "Relay-Setup-${version}-win-x64.${ext}"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "qdmezzy",
+        "repo": "relay"
+      }
+    ],
+    "portable": {
+      "artifactName": "Relay-${version}-win-x64-portable.${ext}"
+    }
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  }
+}

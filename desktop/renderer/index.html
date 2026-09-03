@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:">
+  <title>Relay</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="window-shell">
+    <header class="titlebar">
+      <div class="titlebar-drag">
+        <div class="app-brand"><img src="../assets/relay-mark.png" alt=""><strong>Relay</strong><span>Translate as you type.</span></div>
+      </div>
+      <div class="titlebar-tools">
+        <div class="engine-status" id="headerStatus"><span class="status-mark" id="headerStatusDot"></span><span id="headerStatusText">Connecting</span></div>
+        <button class="icon-button" id="settingsButton" aria-label="Open settings" title="Settings">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="2.4"/><path d="M16.1 11.2V8.8l-1.8-.5a5.5 5.5 0 0 0-.6-1.3l.9-1.6-1.7-1.7-1.6.9a5.5 5.5 0 0 0-1.3-.5L9.5 2H7.2l-.5 2.1a5.5 5.5 0 0 0-1.3.5l-1.6-.9-1.7 1.7L3 7a5.5 5.5 0 0 0-.5 1.3l-1.9.5v2.4l1.9.5A5.5 5.5 0 0 0 3 13l-.9 1.6 1.7 1.7 1.6-.9a5.5 5.5 0 0 0 1.3.5l.5 2.1h2.3l.5-2.1a5.5 5.5 0 0 0 1.3-.5l1.6.9 1.7-1.7-.9-1.6a5.5 5.5 0 0 0 .6-1.3z" transform="translate(1.4) scale(.86)"/></svg>
+        </button>
+        <div class="window-actions">
+          <button class="window-button" id="minimizeButton" aria-label="Minimize"><svg viewBox="0 0 12 12"><path d="M2 8.5h8"/></svg></button>
+          <button class="window-button" id="maximizeButton" aria-label="Maximize"><svg viewBox="0 0 12 12"><rect x="2.5" y="2.5" width="7" height="7"/></svg></button>
+          <button class="window-button close" id="closeButton" aria-label="Close to tray"><svg viewBox="0 0 12 12"><path d="m3 3 6 6M9 3 3 9"/></svg></button>
+        </div>
+      </div>
+    </header>
+
+    <main class="main">
+      <div class="page active translation-page" id="page-home">
+        <section class="auto-section" aria-labelledby="autoTitle">
+          <div class="section-heading">
+            <div><h1 id="autoTitle">Auto Translate</h1><p>Translate messages automatically when you press Enter.</p></div>
+            <button class="switch" id="autoSwitch" role="switch" aria-checked="false"><span></span></button>
+          </div>
+
+          <div class="settings-group">
+            <label class="setting-row" for="autoLanguageSelect"><span>Translate typing to</span><select id="autoLanguageSelect"><option value="ko">Korean</option><option value="ja" selected>Japanese</option><option value="fr">French</option></select></label>
+            <div class="setting-row"><span>Read selected text</span><div class="setting-actions"><select id="readLanguageSelect" aria-label="Read selected text in"><option>English</option></select><button class="switch compact" id="highlightSwitch" role="switch" aria-checked="false"><span></span></button></div></div>
+          </div>
+          <p class="target-context" id="targetAppText">Open a chat once to set the target app.</p>
+        </section>
+
+        <section class="quick-section" aria-labelledby="quickTitle">
+          <div class="quick-heading"><h1 id="quickTitle">Quick Translate</h1><kbd>Ctrl Enter</kbd></div>
+          <div class="translation-surface" id="translationSurface">
+            <div class="translation-pane source-pane">
+              <div class="pane-toolbar"><select id="quickSource" aria-label="Source language"><option value="auto">Detect language</option></select><span class="character-count" id="characterCount"></span></div>
+              <textarea id="quickInput" maxlength="2000" placeholder="Type or paste text…"></textarea>
+            </div>
+            <div class="translation-pane output-pane">
+              <div class="pane-toolbar"><select id="quickTarget" aria-label="Target language"><option value="ko">Korean</option><option value="ja" selected>Japanese</option><option value="fr">French</option><option value="en">English</option></select><button class="copy-button hidden" id="copyOutputButton" aria-label="Copy translation"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="7" height="7" rx="1"/><path d="M3.5 10.5h-1v-7a1 1 0 0 1 1-1h7v1"/></svg><span>Copy</span></button></div>
+              <div class="quick-output placeholder" id="quickOutput" aria-live="polite">Translation appears here…</div>
+            </div>
+          </div>
+          <div class="translator-actions"><span class="inline-error" id="quickError"></span><button class="primary-button" id="translateButton"><span>Translate</span><svg viewBox="0 0 18 18" aria-hidden="true"><path d="M4 9h10M10 5l4 4-4 4"/></svg></button></div>
+        </section>
+      </div>
+
+      <div class="page settings-page" id="page-voice">
+        <header class="content-heading settings-heading"><button class="settings-back" data-page="home" aria-label="Back to Translation"><svg viewBox="0 0 18 18" aria-hidden="true"><path d="m11 4-5 5 5 5M6 9h8"/></svg></button><div><h1>Settings</h1><p>Adjust how Relay sounds and where translations run.</p></div></header>
+        <nav class="settings-switcher" aria-label="Settings sections"><button class="settings-nav-item active" data-page="voice">Voice &amp; Tone</button><button class="settings-nav-item" data-page="settings">Engine</button></nav>
+
+        <section class="settings-section">
+          <h2>Writing style</h2>
+          <div class="form-grid two-column">
+            <label class="field"><span>Name in prompts</span><input id="voiceName" type="text" maxlength="60" placeholder="me"></label>
+            <label class="field"><span>Speech style</span><select id="speechStyle"><option value="masculine-neutral">Masculine, relaxed</option><option value="masculine">Masculine</option><option value="neutral">Neutral</option><option value="feminine">Feminine</option></select></label>
+          </div>
+          <label class="field"><span>Writing habits</span><small>One habit per line.</small><textarea id="styleNotes" rows="7" placeholder="all lowercase&#10;no periods at the end&#10;uses lol and ngl a lot"></textarea></label>
+        </section>
+
+        <section class="settings-section tone-section">
+          <h2>Default tone by language</h2>
+          <div class="tone-row"><div><strong>Korean</strong><span>한국어</span></div><select id="registerKo"><option value="banmal">Close friends — 반말</option><option value="haeyo">Friendly — 해요체</option><option value="formal">Formal — 합쇼체</option></select></div>
+          <div class="tone-row"><div><strong>Japanese</strong><span>日本語</span></div><select id="registerJa"><option value="tameguchi">Close friends — タメ口</option><option value="teineigo">Polite — です・ます</option><option value="keigo">Formal — 敬語</option></select></div>
+          <div class="tone-row"><div><strong>French</strong><span>français</span></div><select id="registerFr"><option value="tu_familier">Close friends — tu, casual</option><option value="tu_neutre">Neutral — tu</option><option value="vous">Formal — vous</option></select></div>
+        </section>
+
+        <div class="save-bar"><span id="voiceSaveState">Changes apply to the next translation.</span><button class="primary-button" id="saveVoiceButton">Save changes</button></div>
+      </div>
+
+      <div class="page settings-page" id="page-settings">
+        <header class="content-heading settings-heading"><button class="settings-back" data-page="home" aria-label="Back to Translation"><svg viewBox="0 0 18 18" aria-hidden="true"><path d="m11 4-5 5 5 5M6 9h8"/></svg></button><div><h1>Settings</h1><p>Adjust how Relay sounds and where translations run.</p></div></header>
+        <nav class="settings-switcher" aria-label="Settings sections"><button class="settings-nav-item" data-page="voice">Voice &amp; Tone</button><button class="settings-nav-item active" data-page="settings">Engine</button></nav>
+
+        <section class="settings-section">
+          <h2>Provider</h2>
+          <div class="provider-control">
+            <button class="provider-card active" data-provider="ollama"><span><strong>Free</strong><small>Runs on this PC</small></span></button>
+            <button class="provider-card" data-provider="anthropic"><span><strong>API key</strong><small>Better, you pay</small></span></button>
+          </div>
+        </section>
+
+        <section class="settings-section provider-settings" id="ollamaSettings">
+          <div class="section-title-row"><h2>Ollama</h2><span class="connection-state" id="connectionText">Checking connection…</span></div>
+          <div class="form-grid two-column"><label class="field"><span>Model</span><input id="ollamaModel" type="text" placeholder="qwen3:8b"></label><label class="field"><span>Server address</span><input id="ollamaHost" type="url" placeholder="http://127.0.0.1:11434"></label></div>
+          <div class="section-actions"><span>Messages stay on this computer.</span><button class="text-button" id="recheckButton">Check connection</button><button class="text-button" id="downloadOllamaButton">Get Ollama ↗</button></div>
+        </section>
+
+        <section class="settings-section provider-settings hidden" id="anthropicSettings">
+          <div class="section-title-row"><h2>Anthropic</h2><span class="connection-state" id="keyState">No key yet</span></div>
+          <label class="field"><span>API key</span><input id="anthropicKey" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-..."></label>
+          <div class="form-grid two-column"><label class="field"><span>Model</span><input id="anthropicModel" type="text" placeholder="claude-opus-5"></label><label class="field"><span>Thinking effort</span><select id="anthropicEffort"><option value="low">Low — fastest</option><option value="medium">Medium</option><option value="high">High — slowest</option></select></label></div>
+          <div class="section-actions"><span>Your key is stored on this computer and never shown again.</span><button class="text-button" id="removeKeyButton">Remove key</button><button class="text-button" id="getKeyButton">Get a key ↗</button></div>
+        </section>
+
+        <section class="about-section"><div><strong id="versionLabel">Relay</strong><span id="updateState">Translation service and app data</span></div><div class="section-actions"><button class="text-button" id="checkUpdateButton">Check for updates</button><button class="secondary-button hidden" id="installUpdateButton">Restart to update</button><button class="secondary-button" id="openDataButton">Open app data</button></div></section>
+        <div class="save-bar"><button class="primary-button" id="saveSettingsButton">Save changes</button></div>
+      </div>
+    </main>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"><span class="toast-icon">✓</span><span id="toastText">Saved</span></div>
+  <script src="app.js"></script>
+</body>
+</html>

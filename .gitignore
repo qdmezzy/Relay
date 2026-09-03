@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.release/
+ui-preview*.png
+config.json
+.env
+server.log

@@ -1,0 +1,50 @@
+{
+  "provider": "ollama",
+  "port": 8765,
+  "providers": {
+    "ollama": {
+      "host": "http://127.0.0.1:11434",
+      "model": "qwen3:8b",
+      "temperature": 0.3
+    },
+    "anthropic": {
+      "model": "claude-opus-5",
+      "effort": "low"
+    }
+  },
+  "you": {
+    "name": "me",
+    "style": [
+      "types in all lowercase, basically never capitalises anything",
+      "usually no period at the end of a message",
+      "short messages, often fragments, often several in a row instead of one long one",
+      "swears casually - it is punctuation, not aggression",
+      "uses lol / lmao / ngl / fr / istg constantly",
+      "stretches words for emphasis (soooo, waitttt, nooo)"
+    ],
+    "speech": "masculine-neutral"
+  },
+  "profiles": {
+    "ko": {
+      "lang": "ko",
+      "default": true,
+      "register": "banmal",
+      "glossary": {},
+      "notes": []
+    },
+    "ja": {
+      "lang": "ja",
+      "default": true,
+      "register": "tameguchi",
+      "glossary": {},
+      "notes": []
+    },
+    "fr": {
+      "lang": "fr",
+      "default": true,
+      "register": "tu_familier",
+      "glossary": {},
+      "notes": []
+    }
+  }
+}
