@@ -12,6 +12,9 @@ Sits in the Windows tray and works in the apps you choose.
 **Auto translate.** Pick a language, then type and press Enter like normal. Your
 message goes out translated
 
+**Reads it back to you.** Relay translates your message back to English before it
+goes, so you can see what it actually says. It flags anything that changed
+
 **Selected text popup.** Turn it on, highlight someone's message, and the English
 pops up next to your cursor for a few seconds. No shortcut needed
 
@@ -48,15 +51,14 @@ ollama pull translategemma:4b
 
 Relay tells you if either one is missing.
 
-
 ## Free or paid
 
 Ollama is the default and it's free. Runs on your GPU, nothing leaves the
 machine, and Relay drops the model out of VRAM when you close it.
 
-If you want it sharper, paste an Anthropic key on the Engine page instead — a
-few dollars a month at normal use. The key is saved on your machine and never
-shown again once you save it.
+The free model is fine for short messages and gets vaguer on long ones. For
+something sharper, paste an Anthropic key on the Engine page - about a third of
+a cent a message, so $10 lasts weeks. The key stays on your machine.
 
 ## Running from source
 
