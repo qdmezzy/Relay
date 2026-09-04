@@ -15,7 +15,7 @@ let lastSystem = "", lastUser = "", lastMessages = [], reply = "";
 const fakeOllama = http.createServer((req, res) => {
   if (req.url === "/api/tags") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    return res.end(JSON.stringify({ models: [{ name: "qwen3:8b" }] }));
+    return res.end(JSON.stringify({ models: [{ name: "translategemma:4b" }] }));
   }
   let body = "";
   req.on("data", (c) => (body += c));
@@ -37,6 +37,10 @@ const cfgPath = path.join(ROOT, "config.json");
 const original = fs.readFileSync(cfgPath, "utf8");
 const test = JSON.parse(original);
 test.port = APP_PORT;
+// pin the local backend. this used to inherit whatever provider config.json
+// had, so running the tests with the paid one selected pointed them at the
+// real api and spent real money to check a fake reply came back
+test.provider = "ollama";
 test.providers.ollama.host = "http://127.0.0.1:" + FAKE_PORT;
 
 let pass = 0, fail = 0;

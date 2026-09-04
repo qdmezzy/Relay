@@ -17,21 +17,45 @@ export function createAnthropicProvider(cfg) {
   return {
     name: "anthropic:" + model,
 
-    async translate({ system, user, shots = [], signal, model: modelOverride }) {
+    async translate({ system, user, shots = [], stable = 0, signal, model: modelOverride }) {
+      // the examples live in messages, not system, so a breakpoint on system
+      // alone left ~1k tokens of them being re-sent at full price every single
+      // message. mark the end of the unchanging run instead and the whole
+      // prefix caches. an hour, not the default five minutes - i type in bursts
+      // and a message twenty minutes later was paying to write the cache again.
+      const messages = [...shots, { role: "user", content: user }];
+      const boundary = Math.min(stable, shots.length) - 1;
+      if (boundary >= 0) {
+        const last = messages[boundary];
+        messages[boundary] = {
+          ...last,
+          content: [
+            {
+              type: "text",
+              text: last.content,
+              cache_control: { type: "ephemeral", ttl: "1h" },
+            },
+          ],
+        };
+      }
+
       const res = await client.messages.create(
         {
           model: modelOverride || model,
-          max_tokens: 4000,
+          max_tokens: 1500,
           output_config: { effort },
+          // translating a one line chat message is not a reasoning problem, and
+          // thinking tokens bill as output. ~200 of them per message was most
+          // of the cost of a translation that is thirty tokens long.
+          thinking: { type: "disabled" },
           system: [
             {
               type: "text",
               text: system,
-
-              cache_control: { type: "ephemeral" },
+              cache_control: { type: "ephemeral", ttl: "1h" },
             },
           ],
-          messages: [...shots, { role: "user", content: user }],
+          messages,
         },
         { signal }
       );

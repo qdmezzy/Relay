@@ -87,7 +87,12 @@ function isQuestion(source) {
 
   const opener = s.toLowerCase().replace(/^(hey|yo|so|wait|ok|okay|um)[\s,]+/, "");
 
-  if (/^(dont|don't|do not|never|please|just|let me|lets|let's)\b/.test(opener)) return false;
+  // "lets play x" is an invitation, and korean/japanese/french all render those
+  // as a question (할래? / やる？ / on joue ?). neither answer is wrong, so it
+  // is not checked either way
+  if (/^(lets|let's|shall we)\b/.test(opener)) return null;
+
+  if (/^(dont|don't|do not|never|please|just|let me)\b/.test(opener)) return false;
 
   if (
     /^(who|what|whats|when|where|wheres|why|how|hows|which|can|could|would|will|do|does|did|is|are|am|was|were|have|has|any|anyone|wanna|should|shall)\b/.test(
@@ -103,15 +108,25 @@ function isQuestion(source) {
   return null;
 }
 
+// korean and japanese chat mostly can't be bothered with a question mark. "너 뭐해"
+// and "どこにいる" are obviously questions, so count an actual question word as
+// asking too. yes/no questions have no such word and do still need the mark.
+const QUESTION_WORDS =
+  /뭐|무슨|무엇|어디|누구|누가|언제|왜|어떻게|어때|어떤|몇|얼마|何|なに|なん|どこ|どれ|だれ|誰|いつ|なんで|どうして|どうやって|いくら|いくつ|qu'est|quoi|où|quand|pourquoi|comment|combien|quel/i;
+
 export function checkSpeechAct(text, source) {
   const asked = isQuestion(source);
   if (asked === null) return null;
 
-  const answered = /[?？]/.test(text);
+  const marked = /[?？]/.test(text);
 
-  if (asked && !answered) return "a question came back as a statement";
+  // going the other way a question word means nothing - "왜인지 모르겠어" is a
+  // statement with 왜 in it - so that direction still wants a real question mark
+  if (asked && !marked && !QUESTION_WORDS.test(text)) {
+    return "a question came back as a statement";
+  }
 
-  if (!asked && answered) return "a statement came back as a question";
+  if (!asked && marked) return "a statement came back as a question";
 
   return null;
 }

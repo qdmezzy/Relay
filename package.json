@@ -1,6 +1,6 @@
 {
   "name": "relay",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "main": "desktop/main.cjs",
@@ -10,13 +10,17 @@
     "service": "node src/server.js",
     "test": "node test/pipeline.test.js && node test/e2e.test.js && node test/flows.test.js",
     "test:release": "node scripts/smoke-release.mjs",
+    "test:helper": "node test/helper-smoke.cjs",
+    "test:ui": "electron test/ui-smoke.cjs",
     "build:font": "node scripts/build-font.mjs",
     "build:icon": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-brand-assets.ps1 && node scripts/build-icon.mjs",
     "build:server": "node scripts/build-server.mjs",
     "build:helper": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1",
     "build:runtime": "npm run build:server && npm run build:helper",
     "build": "npm run build:font && npm run build:icon && npm run build:runtime && electron-builder --win",
-    "release": "npm run build:font && npm run build:icon && npm run build:runtime && electron-builder --win --publish always"
+    "release": "npm run build:font && npm run build:icon && npm run build:runtime && electron-builder --win --publish always",
+    "sweep": "node test/sweep.js",
+    "fix": "node test/fix.js"
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.70.0",

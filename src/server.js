@@ -1,7 +1,12 @@
 import http from "node:http";
-import { loadConfig, saveConfig, readConfigFile, keyFromEnvironment } from "./config.js";
+import fs from "node:fs";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { CONFIG_PATH, loadConfig, saveConfig, readConfigFile } from "./config.js";
 import { createProvider } from "./providers/index.js";
 import { translate } from "./translate.js";
+import { remember, stats as memoryStats } from "./memory.js";
+import { verifyMeaning } from "./verify.js";
 
 const startupConfig = loadConfig();
 const PORT = startupConfig.port || 8765;
@@ -11,12 +16,62 @@ let backend = { state: "checking", name: "", message: "Checking your translator�
 let runtime = {
   autoLang: "",
   autoProc: "",
-  highlight: false,
   targetProc: "",
+  sendMode: "instant",
+  previewReady: false,
+  selectionPopupEnabled: true,
+  safetyPaused: false,
+  safetyReason: "",
   message: "",
+  lastSeen: 0,
 };
-let commandId = 0;
-let lastCommand = null;
+let commandId = Date.now();
+const commandQueue = [];
+let pullState = { state: "idle", completed: 0, total: 0, percent: 0, message: "" };
+const HISTORY_PATH = process.env.RELAY_HISTORY
+  ? path.resolve(process.env.RELAY_HISTORY)
+  : path.join(path.dirname(CONFIG_PATH), "history.json");
+
+function historyEnabled() {
+  return loadConfig().behavior?.historyEnabled !== false;
+}
+
+function readHistory() {
+  try {
+    const value = JSON.parse(fs.readFileSync(HISTORY_PATH, "utf8"));
+    return Array.isArray(value) ? value : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeHistory(items) {
+  fs.mkdirSync(path.dirname(HISTORY_PATH), { recursive: true });
+  const temp = HISTORY_PATH + ".tmp";
+  fs.writeFileSync(temp, JSON.stringify(items, null, 2) + "\n", "utf8");
+  fs.renameSync(temp, HISTORY_PATH);
+}
+
+function recordHistory({ source, translation, target, origin, app }) {
+  if (!historyEnabled() || !origin || origin === "setup") return;
+  const item = {
+    id: randomUUID(),
+    source: cleanText(source, 2000),
+    translation: cleanText(translation, 4000),
+    target: cleanText(target, 10),
+    origin: cleanText(origin, 30),
+    app: cleanText(app, 180),
+    createdAt: new Date().toISOString(),
+  };
+  if (!item.source || !item.translation) return;
+  try {
+    writeHistory([item, ...readHistory()].slice(0, 100));
+  } catch {}
+}
+
+function clearHistory() {
+  if (fs.existsSync(HISTORY_PATH)) fs.rmSync(HISTORY_PATH);
+}
 
 function send(res, status, body, type = "text/plain; charset=utf-8") {
   const buf = Buffer.from(body, "utf8");
@@ -58,9 +113,6 @@ function publicConfig(config) {
   const copy = structuredClone(config);
   if (copy.providers?.anthropic) {
     delete copy.providers.anthropic.apiKey;
-    const saved = readConfigFile().providers?.anthropic?.apiKey;
-    copy.providers.anthropic.hasApiKey = Boolean(saved) || keyFromEnvironment();
-    copy.providers.anthropic.keyFromEnvironment = keyFromEnvironment();
   }
   return copy;
 }
@@ -74,6 +126,8 @@ function applyConfig(input) {
   const providers = ["ollama", "anthropic"];
   const speech = ["masculine", "masculine-neutral", "neutral", "feminine"];
   const efforts = ["low", "medium", "high"];
+  const themes = ["system", "light", "dark"];
+  const sendModes = ["instant", "review"];
   const registers = {
     ko: ["banmal", "haeyo", "formal"],
     ja: ["tameguchi", "teineigo", "keigo"],
@@ -113,12 +167,39 @@ function applyConfig(input) {
       next.providers.anthropic.effort = input.providers.anthropic.effort;
     }
 
-    const key = input.providers.anthropic.apiKey;
-    if (key === null) {
-      delete next.providers.anthropic.apiKey;
-    } else if (typeof key === "string" && key.trim()) {
-      next.providers.anthropic.apiKey = key.trim();
+  }
+
+  if (next.providers?.anthropic) delete next.providers.anthropic.apiKey;
+
+  if (input.behavior && typeof input.behavior === "object") {
+    next.behavior = next.behavior || {};
+    if (themes.includes(input.behavior.theme)) next.behavior.theme = input.behavior.theme;
+    if (sendModes.includes(input.behavior.sendMode)) next.behavior.sendMode = input.behavior.sendMode;
+    if (typeof input.behavior.onboardingComplete === "boolean") {
+      next.behavior.onboardingComplete = input.behavior.onboardingComplete;
     }
+    if (typeof input.behavior.historyEnabled === "boolean") {
+      next.behavior.historyEnabled = input.behavior.historyEnabled;
+    }
+    if (typeof input.behavior.selectionPopupEnabled === "boolean") {
+      next.behavior.selectionPopupEnabled = input.behavior.selectionPopupEnabled;
+    }
+    if (Array.isArray(input.behavior.allowedApps)) {
+      const seen = new Set();
+      next.behavior.allowedApps = input.behavior.allowedApps
+        .map((app) => cleanText(app, 180))
+        .filter((app) => {
+          const key = app.toLowerCase();
+          if (!app || seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        })
+        .slice(0, 30);
+    }
+    const lastLanguage = cleanText(input.behavior.lastLanguage, 10);
+    if (["ko", "ja", "fr"].includes(lastLanguage)) next.behavior.lastLanguage = lastLanguage;
+    const shortcut = cleanText(input.behavior.openShortcut, 80);
+    if (shortcut) next.behavior.openShortcut = shortcut;
   }
 
   next.profiles = next.profiles || {};
@@ -130,6 +211,69 @@ function applyConfig(input) {
   }
 
   return saveConfig(next);
+}
+
+async function pullModel() {
+  if (pullState.state === "downloading") return;
+  const config = loadConfig();
+  const host = config.providers?.ollama?.host || "http://127.0.0.1:11434";
+  const model = config.providers?.ollama?.model || "translategemma:4b";
+  pullState = {
+    state: "downloading",
+    completed: 0,
+    total: 0,
+    percent: 0,
+    message: "Preparing " + model + "…",
+  };
+
+  try {
+    const response = await fetch(host.replace(/\/+$/, "") + "/api/pull", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model, stream: true }),
+    });
+    if (!response.ok || !response.body) {
+      throw new Error((await response.text()) || "Ollama could not download that model");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let pending = "";
+    const updatePull = (line) => {
+      if (!line.trim()) return;
+      const item = JSON.parse(line);
+      if (item.error) throw new Error(item.error);
+      const completed = Number(item.completed || 0);
+      const total = Number(item.total || 0);
+      pullState = {
+        state: "downloading",
+        completed,
+        total,
+        percent: total ? Math.min(100, Math.round((completed / total) * 100)) : pullState.percent,
+        message: item.status || "Downloading " + model + "…",
+      };
+    };
+    while (true) {
+      const { done, value } = await reader.read();
+      pending += decoder.decode(value || new Uint8Array(), { stream: !done });
+      const lines = pending.split("\n");
+      pending = lines.pop() || "";
+      for (const line of lines) updatePull(line);
+      if (done) break;
+    }
+    updatePull(pending);
+
+    pullState = { state: "ready", completed: 0, total: 0, percent: 100, message: model + " is ready" };
+    await checkBackend();
+  } catch (error) {
+    pullState = {
+      state: "error",
+      completed: 0,
+      total: 0,
+      percent: 0,
+      message: error?.message || "The model download failed",
+    };
+  }
 }
 
 async function checkBackend() {
@@ -155,7 +299,10 @@ function statusPayload() {
   return {
     service: "ready",
     backend,
-    runtime,
+    runtime: {
+      ...runtime,
+      helperConnected: Date.now() - runtime.lastSeen < 5000,
+    },
     provider,
     model: config.providers?.[provider]?.model || "",
   };
@@ -169,7 +316,7 @@ async function handleTranslate(req, res) {
     return send(res, 400, "bad request: " + error.message);
   }
 
-  const { text, target, profile } = payload;
+  const { text, target, profile, origin, app } = payload;
   if (!target) return send(res, 400, "missing target language");
 
   const controller = new AbortController();
@@ -179,6 +326,9 @@ async function handleTranslate(req, res) {
 
   try {
     const result = await translate({ text, target, profile, signal: controller.signal });
+    if (!result.skipped) {
+      recordHistory({ source: text, translation: result.text, target, origin, app });
+    }
     const cost = result.usage?.cost;
     console.log(
       "[" + new Date().toLocaleTimeString() + "] -> " + target +
@@ -224,20 +374,31 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 200, await checkBackend());
   }
 
+  if (req.method === "GET" && url.pathname === "/api/backend/pull") {
+    return sendJson(res, 200, pullState);
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/backend/pull") {
+    pullModel();
+    return sendJson(res, 202, pullState);
+  }
+
   if (req.method === "POST" && url.pathname === "/api/control") {
     try {
       const payload = await readJson(req);
-      const actions = ["auto", "auto-off", "highlight"];
+      const actions = ["auto", "auto-target", "auto-off", "read-selection", "selection-popup", "safety-apps", "send-mode"];
       if (!actions.includes(payload.action)) {
         return sendJson(res, 400, { error: "unknown control action" });
       }
       commandId += 1;
-      lastCommand = {
+      const command = {
         id: commandId,
         action: payload.action,
-        value: cleanText(payload.value, 20),
+        value: cleanText(payload.value, payload.action === "safety-apps" ? 3000 : 240),
       };
-      return sendJson(res, 202, lastCommand);
+      commandQueue.push(command);
+      if (commandQueue.length > 100) commandQueue.shift();
+      return sendJson(res, 202, command);
     } catch (error) {
       return sendJson(res, 400, { error: error.message });
     }
@@ -245,11 +406,12 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === "GET" && url.pathname === "/api/control") {
     const after = Number(url.searchParams.get("after") || 0);
-    if (!lastCommand || lastCommand.id <= after) return send(res, 200, "");
+    const command = commandQueue.find((item) => item.id > after);
+    if (!command) return send(res, 200, "");
     return send(
       res,
       200,
-      lastCommand.id + "\t" + lastCommand.action + "\t" + lastCommand.value
+      command.id + "\t" + command.action + "\t" + command.value
     );
   }
 
@@ -259,12 +421,67 @@ const server = http.createServer(async (req, res) => {
       runtime = {
         autoLang: cleanText(payload.autoLang, 10),
         autoProc: cleanText(payload.autoProc, 180),
-        highlight: Boolean(payload.highlight),
         targetProc: cleanText(payload.targetProc, 180),
+        sendMode: payload.sendMode === "review" ? "review" : "instant",
+        previewReady: Boolean(payload.previewReady),
+        selectionPopupEnabled: payload.selectionPopupEnabled !== false,
+        safetyPaused: Boolean(payload.safetyPaused),
+        safetyReason: cleanText(payload.safetyReason, 180),
         message: cleanText(payload.message, 300),
+        lastSeen: Date.now(),
       };
       return sendJson(res, 200, runtime);
     } catch (error) {
+      return sendJson(res, 400, { error: error.message });
+    }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/memory") {
+    return sendJson(res, 200, memoryStats());
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/history") {
+    return sendJson(res, 200, { enabled: historyEnabled(), items: readHistory() });
+  }
+
+  if (req.method === "DELETE" && url.pathname === "/api/history") {
+    clearHistory();
+    return sendJson(res, 200, { cleared: true });
+  }
+
+  // a translation i corrected by hand. goes in the bank so the next message
+  // that looks like it gets shown the fixed version instead of guessing again.
+  if (req.method === "POST" && url.pathname === "/api/memory") {
+    try {
+      const payload = await readJson(req);
+      const saved = remember(payload.lang, payload.source, payload.translation);
+      return sendJson(res, saved.saved ? 200 : 400, saved);
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message });
+    }
+  }
+
+  // takes the translation back to english so the review popup can show me what
+  // it actually says. separate call on purpose - the draft shows up straight
+  // away and this fills in a moment later instead of holding it up.
+  if (req.method === "POST" && url.pathname === "/api/verify") {
+    const controller = new AbortController();
+    res.on("close", () => {
+      if (!res.writableEnded) controller.abort();
+    });
+    try {
+      const payload = await readJson(req);
+      if (!payload.target) return sendJson(res, 400, { error: "missing target language" });
+      const checked = await verifyMeaning({
+        text: payload.text,
+        translation: payload.translation,
+        target: payload.target,
+        signal: controller.signal,
+        repair: payload.repair !== false,
+      });
+      return sendJson(res, 200, checked);
+    } catch (error) {
+      if (controller.signal.aborted) return;
       return sendJson(res, 400, { error: error.message });
     }
   }

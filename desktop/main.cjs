@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, clipboard, globalShortcut, ipcMain, nativeImage, shell } = require("electron");
+const { app, BrowserWindow, Menu, Tray, clipboard, globalShortcut, ipcMain, nativeImage, nativeTheme, safeStorage, shell } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
@@ -9,7 +9,9 @@ const allowedPaths = new Set([
   "/api/status",
   "/api/config",
   "/api/backend/recheck",
+  "/api/backend/pull",
   "/api/control",
+  "/api/history",
   "/translate",
 ]);
 
@@ -21,6 +23,12 @@ let serverLog;
 let quitting = false;
 let configPath;
 let servicePort = 8765;
+let savedAnthropicKey = "";
+let secretPath;
+let openShortcut = "Control+Alt+T";
+let trayTimer;
+let traySnapshot = null;
+const activeRequests = new Map();
 
 app.setName("Relay");
 const userDataPath = path.join(app.getPath("appData"), "Relay");
@@ -42,6 +50,20 @@ function loadServiceConfig() {
   }
 }
 
+function saveServiceConfig(config) {
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  const temp = configPath + ".desktop.tmp";
+  fs.writeFileSync(temp, JSON.stringify(config, null, 2) + "\n", "utf8");
+  fs.renameSync(temp, configPath);
+  return config;
+}
+
+function updateBehavior(patch) {
+  const config = loadServiceConfig();
+  config.behavior = { ...(config.behavior || {}), ...patch };
+  return saveServiceConfig(config).behavior;
+}
+
 function prepareConfig() {
   if (!app.isPackaged) {
     configPath = path.join(projectRoot, "config.json");
@@ -58,21 +80,107 @@ function prepareConfig() {
   servicePort = loadServiceConfig().port || 8765;
 }
 
-function runtimeEnvironment() {
+// the sync pair is the documented one and gives back a string. the async
+// variants got preferred here and handed back a plain {} instead, which then
+// went to the sdk as the api key - so every request came back "credentials
+// rejected" while the key sat on disk perfectly fine.
+async function encryptSecret(value) {
+  if (!safeStorage.isEncryptionAvailable()) throw new Error("Windows secure storage is not available yet.");
+  const out = safeStorage.encryptString(String(value));
+  if (!Buffer.isBuffer(out)) throw new Error("Secure storage did not return an encrypted key.");
+  return out;
+}
+
+async function decryptSecret(value) {
+  const out = safeStorage.decryptString(value);
+  return typeof out === "string" ? out : "";
+}
+
+async function prepareSecrets() {
+  secretPath = path.join(app.getPath("userData"), "anthropic-key.bin");
+  try {
+    if (fs.existsSync(secretPath) && safeStorage.isEncryptionAvailable()) {
+      savedAnthropicKey = await decryptSecret(fs.readFileSync(secretPath));
+    }
+  } catch {
+    savedAnthropicKey = "";
+  }
+
+  // never let anything but a real key string past here. passing an object to
+  // the sdk fails as an auth error, which reads like a bad key and sends you
+  // hunting in the wrong place.
+  if (typeof savedAnthropicKey !== "string") savedAnthropicKey = "";
+  savedAnthropicKey = savedAnthropicKey.trim();
+  if (savedAnthropicKey && !savedAnthropicKey.startsWith("sk-")) {
+    console.error("[relay] stored key does not look like an API key - ignoring it");
+    savedAnthropicKey = "";
+  }
+
+  const config = loadServiceConfig();
+  const legacyKey = config.providers?.anthropic?.apiKey;
+  if (typeof legacyKey === "string" && legacyKey.trim()) {
+    if (!savedAnthropicKey) {
+      const encrypted = await encryptSecret(legacyKey.trim());
+      fs.writeFileSync(secretPath, encrypted);
+      savedAnthropicKey = legacyKey.trim();
+    }
+    delete config.providers.anthropic.apiKey;
+    saveServiceConfig(config);
+  }
+}
+
+async function storeAnthropicKey(value) {
+  const key = String(value || "").trim();
+  if (!key) throw new Error("Paste an API key first.");
+  const encrypted = await encryptSecret(key);
+  fs.writeFileSync(secretPath, encrypted);
+  savedAnthropicKey = key;
+  return secretStatus();
+}
+
+function removeAnthropicKey() {
+  savedAnthropicKey = "";
+  if (secretPath && fs.existsSync(secretPath)) fs.rmSync(secretPath);
+  return secretStatus();
+}
+
+function secretStatus() {
   return {
-    ...process.env,
-    TYPE_TRANSLATE_CONFIG: configPath,
+    hasKey: Boolean(process.env.ANTHROPIC_API_KEY || savedAnthropicKey),
+    fromEnvironment: Boolean(process.env.ANTHROPIC_API_KEY),
   };
 }
 
-function startRuntime() {
-  const runtime = app.isPackaged
+function runtimeEnvironment() {
+  const environment = {
+    ...process.env,
+    RELAY_CONFIG: configPath,
+    RELAY_PORT: String(servicePort),
+  };
+  if (!environment.ANTHROPIC_API_KEY && savedAnthropicKey) {
+    environment.ANTHROPIC_API_KEY = savedAnthropicKey;
+  }
+  return environment;
+}
+
+function runtimeRoot() {
+  return app.isPackaged
     ? path.join(process.resourcesPath, "runtime")
     : projectRoot;
-  const logPath = path.join(app.getPath("userData"), "server.log");
-  fs.mkdirSync(path.dirname(logPath), { recursive: true });
-  serverLog = fs.openSync(logPath, "a");
+}
 
+function keepAlive(kind, child) {
+  child.once("exit", () => {
+    if (kind === "server" && serverChild === child) serverChild = null;
+    if (kind === "helper" && helperChild === child) helperChild = null;
+    if (quitting) return;
+    setTimeout(() => kind === "server" ? startServerProcess() : startHelperProcess(), 900);
+  });
+}
+
+function startServerProcess() {
+  if (serverChild && serverChild.exitCode === null) return;
+  const runtime = runtimeRoot();
   if (app.isPackaged) {
     serverChild = spawn(path.join(runtime, "Relay Server.exe"), [], {
       cwd: runtime,
@@ -80,29 +188,35 @@ function startRuntime() {
       windowsHide: true,
       stdio: ["ignore", serverLog, serverLog],
     });
+  } else {
+    const nodePath = process.env.npm_node_execpath || "node";
+    serverChild = spawn(nodePath, [path.join(projectRoot, "src", "server.js")], {
+      cwd: projectRoot,
+      env: runtimeEnvironment(),
+      windowsHide: true,
+      stdio: ["ignore", serverLog, serverLog],
+    });
+  }
+  keepAlive("server", serverChild);
+}
+
+function startHelperProcess() {
+  if (helperChild && helperChild.exitCode === null) return;
+  const runtime = runtimeRoot();
+  if (app.isPackaged) {
     helperChild = spawn(path.join(runtime, "Relay Helper.exe"), [], {
       cwd: runtime,
       env: runtimeEnvironment(),
       windowsHide: true,
       stdio: "ignore",
     });
-    return;
-  }
-
-  const nodePath = process.env.npm_node_execpath || "node";
-  serverChild = spawn(nodePath, [path.join(projectRoot, "src", "server.js")], {
-    cwd: projectRoot,
-    env: runtimeEnvironment(),
-    windowsHide: true,
-    stdio: ["ignore", serverLog, serverLog],
-  });
-
-  const ahkPaths = [
-    path.join(process.env.LOCALAPPDATA || "", "Programs", "AutoHotkey", "v2", "AutoHotkey64.exe"),
-    path.join(process.env.ProgramFiles || "", "AutoHotkey", "v2", "AutoHotkey64.exe"),
-  ];
-  const ahk = ahkPaths.find((candidate) => candidate && fs.existsSync(candidate));
-  if (ahk) {
+  } else {
+    const ahkPaths = [
+      path.join(process.env.LOCALAPPDATA || "", "Programs", "AutoHotkey", "v2", "AutoHotkey64.exe"),
+      path.join(process.env.ProgramFiles || "", "AutoHotkey", "v2", "AutoHotkey64.exe"),
+    ];
+    const ahk = ahkPaths.find((candidate) => candidate && fs.existsSync(candidate));
+    if (!ahk) return;
     helperChild = spawn(ahk, [path.join(projectRoot, "ahk", "relay.ahk")], {
       cwd: projectRoot,
       env: runtimeEnvironment(),
@@ -110,6 +224,20 @@ function startRuntime() {
       stdio: "ignore",
     });
   }
+  keepAlive("helper", helperChild);
+}
+
+function restartServer() {
+  if (serverChild && serverChild.exitCode === null) serverChild.kill();
+  else startServerProcess();
+}
+
+function startRuntime() {
+  const logPath = path.join(app.getPath("userData"), "server.log");
+  fs.mkdirSync(path.dirname(logPath), { recursive: true });
+  serverLog = fs.openSync(logPath, "a");
+  startServerProcess();
+  startHelperProcess();
 }
 
 function releaseModel(done) {
@@ -197,12 +325,16 @@ function setupUpdates() {
   autoUpdater.on("update-downloaded", (info) => tell("ready", { version: info.version }));
   autoUpdater.on("error", (error) => tell("error", { message: String(error?.message || error) }));
 
-  ipcMain.handle("app:install-update", () => {
+  ipcMain.handle("app:install-update", (event) => {
+    requireTrusted(event);
     if (portable) return shell.openExternal("https://github.com/qdmezzy/relay/releases/latest");
     quitting = true;
     autoUpdater.quitAndInstall();
   });
-  ipcMain.handle("app:check-updates", () => autoUpdater.checkForUpdates().catch(() => null));
+  ipcMain.handle("app:check-updates", (event) => {
+    requireTrusted(event);
+    return autoUpdater.checkForUpdates().catch(() => null);
+  });
 
   autoUpdater.checkForUpdates().catch(() => {});
   setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 24 * 60 * 60 * 1000);
@@ -216,7 +348,133 @@ function showWindow(page) {
   if (page) mainWindow.webContents.send("navigate", page);
 }
 
+function languageName(language) {
+  return { ko: "Korean", ja: "Japanese", fr: "French" }[language] || "Japanese";
+}
+
+function processLabel(processName) {
+  return String(processName || "").replace(/\.exe$/i, "") || "None";
+}
+
+function alwaysBlockedApp(processName) {
+  return new Set([
+    "windowsterminal.exe", "cmd.exe", "powershell.exe", "pwsh.exe", "conhost.exe",
+    "mintty.exe", "bash.exe", "wsl.exe", "ssh.exe", "1password.exe", "bitwarden.exe",
+    "keepass.exe", "keepassxc.exe", "credentialuibroker.exe",
+  ]).has(String(processName || "").toLowerCase());
+}
+
+function allowedApps() {
+  const apps = loadServiceConfig().behavior?.allowedApps;
+  return Array.isArray(apps) ? apps.filter(Boolean) : [];
+}
+
+function allowApp(processName) {
+  if (!processName) return allowedApps();
+  const current = allowedApps();
+  if (!current.some((item) => item.toLowerCase() === processName.toLowerCase())) current.push(processName);
+  updateBehavior({ allowedApps: current.slice(0, 30) });
+  return current;
+}
+
+async function queueControl(action, value = "") {
+  return serviceRequest({ path: "/api/control", method: "POST", body: { action, value }, timeout: 3000 });
+}
+
+async function setTrayLanguage(language) {
+  updateBehavior({ lastLanguage: language });
+  const runtime = traySnapshot?.runtime || {};
+  if (runtime.autoLang && runtime.autoProc) {
+    const apps = allowApp(runtime.autoProc);
+    await queueControl("safety-apps", apps.join("|"));
+    await queueControl("auto-target", language + "|" + runtime.autoProc);
+  }
+  setTimeout(refreshTrayMenu, 450);
+}
+
+async function toggleTrayAuto() {
+  const runtime = traySnapshot?.runtime || {};
+  if (runtime.autoLang) {
+    await queueControl("auto-off");
+  } else {
+    const target = runtime.autoProc || runtime.targetProc;
+    if (!target) {
+      showWindow("home");
+      return;
+    }
+    if (alwaysBlockedApp(target)) {
+      showWindow("home");
+      return;
+    }
+    const behavior = loadServiceConfig().behavior || {};
+    const language = behavior.lastLanguage || "ja";
+    const apps = allowApp(target);
+    await queueControl("safety-apps", apps.join("|"));
+    await queueControl("auto-target", language + "|" + target);
+  }
+  setTimeout(refreshTrayMenu, 450);
+}
+
+function trayTemplate() {
+  const runtime = traySnapshot?.runtime || {};
+  const behavior = loadServiceConfig().behavior || {};
+  const language = runtime.autoLang || behavior.lastLanguage || "ja";
+  const target = runtime.autoProc || runtime.targetProc || "";
+  const template = [
+    {
+      label: runtime.autoLang ? "Auto Translate · " + languageName(runtime.autoLang) : "Auto Translate",
+      type: "checkbox",
+      checked: Boolean(runtime.autoLang),
+      enabled: Boolean(traySnapshot),
+      click: () => toggleTrayAuto().catch(() => showWindow("home")),
+    },
+    {
+      label: "Language",
+      enabled: Boolean(traySnapshot),
+      submenu: [
+        ["ko", "Korean"],
+        ["ja", "Japanese"],
+        ["fr", "French"],
+      ].map(([value, label]) => ({
+        label,
+        type: "radio",
+        checked: language === value,
+        click: () => setTrayLanguage(value).catch(() => showWindow("home")),
+      })),
+    },
+    { label: "Target · " + processLabel(target), enabled: false },
+  ];
+  if (runtime.safetyPaused) template.push({ label: "Paused · " + (runtime.safetyReason || "Sensitive field"), enabled: false });
+  template.push(
+    { type: "separator" },
+    { label: "Translate selected text", accelerator: "Ctrl+Alt+H", click: () => queueControl("read-selection").catch(() => {}) },
+    { label: "Open Relay", click: () => showWindow("home") },
+    { label: "Settings", click: () => showWindow("settings") },
+    { type: "separator" },
+    { label: "Quit", click: () => { quitting = true; app.quit(); } }
+  );
+  return template;
+}
+
+async function refreshTrayMenu() {
+  if (!tray || tray.isDestroyed()) return;
+  try {
+    traySnapshot = await serviceRequest({ path: "/api/status", method: "GET", timeout: 1800 });
+  } catch {
+    traySnapshot = null;
+  }
+  tray.setToolTip(traySnapshot?.runtime?.safetyPaused ? "Relay · Paused" : "Relay");
+}
+
+async function syncHelperBehavior() {
+  const behavior = loadServiceConfig().behavior || {};
+  await queueControl("safety-apps", allowedApps().join("|"));
+  await queueControl("send-mode", behavior.sendMode || "instant");
+  await queueControl("selection-popup", String(behavior.selectionPopupEnabled !== false));
+}
+
 function createWindow() {
+  const dark = nativeTheme.shouldUseDarkColors;
   mainWindow = new BrowserWindow({
     width: 1080,
     height: 720,
@@ -224,7 +482,7 @@ function createWindow() {
     minHeight: 620,
     show: false,
     frame: false,
-    backgroundColor: "#f6f6f4",
+    backgroundColor: dark ? "#171716" : "#f6f6f4",
     icon: brandIcon(256),
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
@@ -243,19 +501,16 @@ function createWindow() {
     }
   });
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  mainWindow.webContents.on("will-navigate", (event) => event.preventDefault());
 }
 
 function createTray() {
   tray = new Tray(brandIcon(24));
   tray.setToolTip("Relay");
-  tray.setContextMenu(Menu.buildFromTemplate([
-    { label: "Open Relay", click: () => showWindow("home") },
-    { label: "Voice & tone", click: () => showWindow("voice") },
-    { label: "Settings", click: () => showWindow("settings") },
-    { type: "separator" },
-    { label: "Quit", click: () => { quitting = true; app.quit(); } },
-  ]));
   tray.on("click", () => showWindow());
+  tray.on("right-click", () => tray.popUpContextMenu(Menu.buildFromTemplate(trayTemplate())));
+  refreshTrayMenu();
+  trayTimer = setInterval(refreshTrayMenu, 1800);
 }
 
 async function serviceRequest(request) {
@@ -263,6 +518,8 @@ async function serviceRequest(request) {
     throw new Error("That app request is not allowed.");
   }
   const controller = new AbortController();
+  const requestId = String(request.id || "");
+  if (requestId) activeRequests.set(requestId, controller);
   const timeout = setTimeout(() => controller.abort(), request.timeout || 50000);
   try {
     const response = await fetch("http://127.0.0.1:" + servicePort + request.path, {
@@ -280,24 +537,128 @@ async function serviceRequest(request) {
     return data;
   } finally {
     clearTimeout(timeout);
+    if (requestId) activeRequests.delete(requestId);
   }
 }
 
+function trusted(event) {
+  try {
+    return new URL(event.senderFrame.url).protocol === "file:";
+  } catch {
+    return false;
+  }
+}
+
+function requireTrusted(event) {
+  if (!trusted(event)) throw new Error("That app request is not allowed.");
+}
+
+function applyTheme(theme) {
+  nativeTheme.themeSource = ["light", "dark"].includes(theme) ? theme : "system";
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.setBackgroundColor(nativeTheme.shouldUseDarkColors ? "#171716" : "#f6f6f4");
+  }
+}
+
+function preferences() {
+  const behavior = loadServiceConfig().behavior || {};
+  return {
+    theme: behavior.theme || "system",
+    dark: nativeTheme.shouldUseDarkColors,
+    openAtLogin: app.getLoginItemSettings().openAtLogin,
+    startupSupported: app.isPackaged,
+    openShortcut,
+  };
+}
+
+function registerOpenShortcut(accelerator, persist = true) {
+  const next = String(accelerator || "").trim();
+  if (!next) return { ok: false, message: "Choose a shortcut." };
+  const previous = openShortcut;
+  globalShortcut.unregister(previous);
+  const ok = globalShortcut.register(next, () => showWindow());
+  if (!ok) {
+    globalShortcut.register(previous, () => showWindow());
+    return { ok: false, shortcut: previous, message: "That shortcut is already being used by another app." };
+  }
+  openShortcut = next;
+  if (persist) updateBehavior({ openShortcut });
+  return { ok: true, shortcut: openShortcut };
+}
+
 function registerIpc() {
-  ipcMain.handle("service:request", (_, request) => serviceRequest(request));
-  ipcMain.handle("app:meta", () => ({ version: app.getVersion(), packaged: app.isPackaged }));
-  ipcMain.handle("app:open-data", () => shell.showItemInFolder(configPath));
-  ipcMain.handle("app:open-external", (_, url) => {
-    if (url === "https://ollama.com/download") return shell.openExternal(url);
+  ipcMain.handle("service:request", (event, request) => {
+    requireTrusted(event);
+    return serviceRequest(request);
+  });
+  ipcMain.handle("service:cancel", (event, requestId) => {
+    requireTrusted(event);
+    activeRequests.get(String(requestId || ""))?.abort();
+  });
+  ipcMain.handle("service:restart", (event) => {
+    requireTrusted(event);
+    restartServer();
+  });
+  ipcMain.handle("app:meta", (event) => {
+    requireTrusted(event);
+    return { version: app.getVersion(), packaged: app.isPackaged };
+  });
+  ipcMain.handle("app:open-data", (event) => {
+    requireTrusted(event);
+    return shell.showItemInFolder(configPath);
+  });
+  ipcMain.handle("app:open-external", (event, url) => {
+    requireTrusted(event);
+    if (["https://ollama.com/download", "https://console.anthropic.com/settings/keys"].includes(url)) return shell.openExternal(url);
     throw new Error("That link is not allowed.");
   });
-  ipcMain.handle("clipboard:write", (_, text) => clipboard.writeText(String(text || "")));
-  ipcMain.on("window:minimize", () => mainWindow?.minimize());
-  ipcMain.on("window:maximize", () => {
+  ipcMain.handle("clipboard:write", (event, value) => {
+    requireTrusted(event);
+    clipboard.writeText(String(value || ""));
+  });
+  ipcMain.handle("secret:status", (event) => {
+    requireTrusted(event);
+    return secretStatus();
+  });
+  ipcMain.handle("secret:set", (event, value) => {
+    requireTrusted(event);
+    return storeAnthropicKey(value);
+  });
+  ipcMain.handle("secret:remove", (event) => {
+    requireTrusted(event);
+    return removeAnthropicKey();
+  });
+  ipcMain.handle("app:preferences", (event) => {
+    requireTrusted(event);
+    return preferences();
+  });
+  ipcMain.handle("app:set-theme", (event, theme) => {
+    requireTrusted(event);
+    const value = ["system", "light", "dark"].includes(theme) ? theme : "system";
+    updateBehavior({ theme: value });
+    applyTheme(value);
+    return preferences();
+  });
+  ipcMain.handle("app:set-startup", (event, enabled) => {
+    requireTrusted(event);
+    if (app.isPackaged) app.setLoginItemSettings({ openAtLogin: Boolean(enabled), path: process.execPath });
+    return preferences();
+  });
+  ipcMain.handle("app:set-shortcut", (event, accelerator) => {
+    requireTrusted(event);
+    return registerOpenShortcut(accelerator);
+  });
+  ipcMain.on("window:minimize", (event) => {
+    if (trusted(event)) mainWindow?.minimize();
+  });
+  ipcMain.on("window:maximize", (event) => {
+    if (!trusted(event)) return;
     if (!mainWindow) return;
     mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize();
   });
-  ipcMain.on("window:hide", () => mainWindow?.hide());
+  ipcMain.on("window:hide", (event) => {
+    if (trusted(event)) mainWindow?.hide();
+  });
 }
 
 app.on("second-instance", () => showWindow());
@@ -312,17 +673,27 @@ app.on("before-quit", (event) => {
     return;
   }
   globalShortcut.unregisterAll();
+  if (trayTimer) clearInterval(trayTimer);
   stopRuntime();
 });
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   app.setAppUserModelId("com.relay.desktop");
   Menu.setApplicationMenu(null);
   prepareConfig();
+  await prepareSecrets();
+  const behavior = loadServiceConfig().behavior || {};
+  applyTheme(behavior.theme || "system");
+  openShortcut = behavior.openShortcut || "Control+Alt+T";
   registerIpc();
   startRuntime();
   createWindow();
   createTray();
-  globalShortcut.register("Control+Alt+T", () => showWindow());
+  registerOpenShortcut(openShortcut, false);
+  setTimeout(() => syncHelperBehavior().catch(() => {}), 900);
+  nativeTheme.on("updated", () => {
+    const info = preferences();
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("theme", info);
+  });
   setupUpdates();
 });

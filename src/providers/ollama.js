@@ -2,14 +2,14 @@
 
 export function createOllamaProvider(cfg) {
   const host = (cfg.host || "http://127.0.0.1:11434").replace(/\/+$/, "");
-  const model = cfg.model || "qwen3:8b";
+  const model = cfg.model || "translategemma:4b";
   const temperature = cfg.temperature ?? 0.3;
 
   return {
     name: "ollama:" + model,
 
     async translate({ system, user, shots = [], signal, model: modelOverride, temperature: tempOverride }) {
-      const model = modelOverride || cfg.model || "qwen3:8b";
+      const model = modelOverride || cfg.model || "translategemma:4b";
       const res = await post(host + "/api/chat", signal, {
           model,
           stream: false,
@@ -22,8 +22,10 @@ export function createOllamaProvider(cfg) {
           ],
           options: {
             temperature: tempOverride ?? temperature,
-
             num_predict: 512,
+            // ollama defaults to a 4096 window and the examples alone eat about
+            // 3.5k of it, so long messages used to fall off the front
+            num_ctx: 8192,
           },
       });
 
@@ -87,7 +89,7 @@ async function post(url, signal, body) {
     throw new Error(
       "Cannot reach Ollama at " + host + ".\n" +
         "  - If it's installed, start it (it runs as a tray app).\n" +
-        "  - If it isn't: https://ollama.com/download , then: ollama pull qwen3:8b"
+        "  - If it isn't: https://ollama.com/download , then: ollama pull translategemma:4b"
     );
   }
 }

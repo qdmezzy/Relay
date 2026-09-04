@@ -5,8 +5,13 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const packaged = Boolean(process.pkg) || process.argv[1] === process.execPath;
 export const ROOT = packaged ? path.dirname(process.execPath) : path.resolve(here, "..");
-export const CONFIG_PATH = process.env.TYPE_TRANSLATE_CONFIG
-  ? path.resolve(process.env.TYPE_TRANSLATE_CONFIG)
+// TYPE_TRANSLATE_CONFIG is the old name from before the rename. an installed
+// copy of the app can be running an older shell that still sets it, and losing
+// the path silently means the server quietly loads default settings instead of
+// mine, so keep answering to both.
+const configFromEnvironment = process.env.RELAY_CONFIG || process.env.TYPE_TRANSLATE_CONFIG;
+export const CONFIG_PATH = configFromEnvironment
+  ? path.resolve(configFromEnvironment)
   : path.join(ROOT, "config.json");
 
 let cached = null;

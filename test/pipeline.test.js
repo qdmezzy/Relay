@@ -146,5 +146,88 @@ t("unknown language fails loudly", () => {
   assert.throws(() => buildOutgoingSystem({ target: "de", you, profile: {} }), /Unknown language/);
 });
 
+console.log("\nquestions");
+const { checkSpeechAct } = await import("../src/sanitize.js");
+
+t("a question word counts as asking, even with no question mark", () => {
+  assert.equal(checkSpeechAct("너 뭐해 ㅋㅋㅋ", "what are you doing lol"), null);
+  assert.equal(checkSpeechAct("어디야", "where are you"), null);
+  assert.equal(checkSpeechAct("どこにいる", "where are you"), null);
+});
+
+t("a yes/no question still wants the mark", () => {
+  assert.match(
+    checkSpeechAct("아직 통화 중이야", "are you still in the call") ?? "",
+    /came back as a statement/
+  );
+});
+
+t("a question word inside a statement is not a question", () => {
+  assert.equal(checkSpeechAct("왜인지 모르겠어", "i dont know why"), null);
+});
+
+t("a statement that came back asking is still caught", () => {
+  assert.match(
+    checkSpeechAct("나 이제 잔다?", "im going to bed now") ?? "",
+    /came back as a question/
+  );
+});
+
+console.log("\nmemory");
+const os = await import("node:os");
+const nodePath = await import("node:path");
+const nodeFs = await import("node:fs");
+const store = nodePath.join(os.tmpdir(), "relay-memory-test-" + process.pid + ".json");
+process.env.RELAY_MEMORY = store;
+const { recall, remember, stats } = await import("../src/memory.js");
+
+t("an empty bank recalls nothing", () => {
+  assert.deepEqual(recall("ko", "anything at all"), []);
+});
+
+t("a saved correction comes back for the same message", () => {
+  remember("ko", "wanna play minecraft tonight?", "오늘 밤에 마크 할래?");
+  const hits = recall("ko", "wanna play minecraft tonight?");
+  assert.equal(hits[0].source, "wanna play minecraft tonight?");
+  assert.equal(hits[0].translation, "오늘 밤에 마크 할래?");
+});
+
+t("it also comes back for a message that only looks similar", () => {
+  const hits = recall("ko", "wanna play minecraft later?");
+  assert.ok(hits.length, "expected the minecraft pair back");
+  assert.ok(hits[0].score > 0.4, "score was only " + hits[0].score);
+});
+
+t("something unrelated recalls nothing", () => {
+  assert.deepEqual(recall("ko", "the mortgage paperwork arrived"), []);
+});
+
+t("a closer match outranks a looser one", () => {
+  remember("ko", "im so tired", "나 개피곤해");
+  const hits = recall("ko", "wanna play minecraft tomorrow?");
+  assert.equal(hits[0].source, "wanna play minecraft tonight?");
+});
+
+t("correcting the same message replaces it instead of stacking", () => {
+  remember("ko", "im so tired", "나 진짜 피곤해");
+  const hits = recall("ko", "im so tired");
+  const mine = hits.filter((h) => h.source === "im so tired");
+  assert.equal(mine.length, 1, "ended up with " + mine.length + " copies");
+  assert.equal(mine[0].translation, "나 진짜 피곤해");
+});
+
+t("the bank is kept per language", () => {
+  assert.equal(stats().ko, 2);
+  assert.equal(stats().ja, 0);
+  assert.deepEqual(recall("ja", "wanna play minecraft tonight?"), []);
+});
+
+t("junk in is refused", () => {
+  assert.equal(remember("ko", "", "something").saved, false);
+  assert.equal(remember("de", "hi", "hallo").saved, false);
+});
+
+try { nodeFs.unlinkSync(store); } catch {}
+
 console.log("\n" + pass + " passed, " + fail + " failed\n");
 process.exit(fail ? 1 : 0);

@@ -4,13 +4,23 @@
   "providers": {
     "ollama": {
       "host": "http://127.0.0.1:11434",
-      "model": "qwen3:8b",
+      "model": "translategemma:4b",
       "temperature": 0.3
     },
     "anthropic": {
       "model": "claude-opus-5",
       "effort": "low"
     }
+  },
+  "behavior": {
+    "theme": "system",
+    "sendMode": "instant",
+    "openShortcut": "Control+Alt+T",
+    "lastLanguage": "ja",
+    "selectionPopupEnabled": true,
+    "historyEnabled": true,
+    "allowedApps": [],
+    "onboardingComplete": false
   },
   "you": {
     "name": "me",

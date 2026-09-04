@@ -1,7 +1,12 @@
 node_modules/
 dist/
 .release/
-ui-preview*.png
+site/
 config.json
-.env
+history.json
+memory.json
 server.log
+.env
+ui-preview*.png
+test/.sweep.json
+test/.fixes.json
